@@ -1,0 +1,70 @@
+{
+  "name": "@central360/broadcast-client",
+  "version": "1.0.0",
+  "description": "Official Central360 satellite SDK — drop-in TypeScript client for the Parinas Central360 HUB broadcast feature. Server-side proxy (HubBroadcastClient + Express router factory) + React layer (BroadcastProvider, hooks, drop-in components: BellIconWithBadge, InboxPanel, BroadcastBanner, BroadcastModalQueue). See the broadcast spec Part III §7 for the full integration guide.",
+  "license": "MIT",
+  "author": "Parinas Group Companies (PGC) — Central360 HUB team",
+  "homepage": "https://central360.parinas.com",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/parinas-pgc/central360-broadcast-client"
+  },
+  "keywords": [
+    "central360",
+    "parinas",
+    "broadcast",
+    "hub",
+    "satellite",
+    "sso",
+    "notifications",
+    "react",
+    "express"
+  ],
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./server": {
+      "types": "./dist/server/index.d.ts",
+      "import": "./dist/server/index.js"
+    },
+    "./react": {
+      "types": "./dist/react/index.d.ts",
+      "import": "./dist/react/index.js"
+    }
+  },
+  "files": [
+    "dist/",
+    "README.md",
+    "LICENSE"
+  ],
+  "sideEffects": false,
+  "scripts": {
+    "clean": "tsc -b --clean",
+    "build": "tsc -b --clean && tsc -b",
+    "typecheck": "tsc -b --noEmit",
+    "prepare": "tsc -b --clean && tsc -b",
+    "prepack": "tsc -b --clean && tsc -b"
+  },
+  "peerDependencies": {
+    "@tanstack/react-query": "^5.0.0",
+    "express": "^5.0.0",
+    "react": ">=18"
+  },
+  "peerDependenciesMeta": {
+    "@tanstack/react-query": { "optional": true },
+    "express": { "optional": true },
+    "react": { "optional": true }
+  },
+  "devDependencies": {
+    "@tanstack/react-query": "catalog:",
+    "@types/express": "^5.0.0",
+    "@types/react": "catalog:",
+    "react": "catalog:",
+    "typescript": "^5.6.0"
+  }
+}

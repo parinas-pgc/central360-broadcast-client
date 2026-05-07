@@ -43,10 +43,26 @@ export interface InboxResponse {
 }
 
 export interface IssueTokenResponse {
-  /** Long-lived hub-callback token (8h by default). Forwarded as `Authorization: Bearer <token>` on every /v1/* call. */
+  /**
+   * Hub-callback token. Forwarded as `Authorization: Bearer <token>` on every
+   * /v1/* call. Variable lifetime — the hub clamps `expiresAt` to the smaller
+   * of (a) 8h from issuance and (b) the user's `originalLoginExp` (Stance 4
+   * cap, deployed 2026-05-07). Never assume "+8h"; always read `expiresAt`
+   * from this response. See `docs/broadcast-stance4-stabilization.md`.
+   */
   callbackToken: string;
-  /** Epoch milliseconds at which the token expires. */
+  /** Epoch milliseconds at which the token expires. Source of truth for TTL. */
   expiresAt: number;
+}
+
+/**
+ * Structured error body the hub may return on `401` from any `/v1/*` endpoint
+ * after the Stance 4 session cap fires. Returned by the satellite proxy router
+ * (added in 1.1.0) so the frontend can distinguish "user's hub session expired,
+ * bounce to hub login" from generic 401s (which are operator-config errors).
+ */
+export interface IssueTokenErrorBody {
+  error: "session_expired";
 }
 
 export interface InboxQuery {

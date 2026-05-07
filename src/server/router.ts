@@ -55,6 +55,15 @@ export interface BroadcastProxyRouterConfig {
  * `express.Router`). The SDK never imports express at runtime — only as types —
  * so installing this package in a frontend-only context (e.g., the hub itself
  * which only uses /react) does not require express to be present.
+ *
+ * **Stance 4 / `session_expired` (added 1.1.0):** when the SDK detects the hub
+ * returned `401 {"error":"session_expired"}` during any underlying call, this
+ * router translates it to `401 {"error":"session_expired"}` on the browser-facing
+ * response (replacing the previous generic `200 EMPTY_INBOX` for inbox or
+ * `502 {ok:false}` for /init). Satellite frontends opt in to proactive
+ * "session expired, please re-login at hub" UX by detecting this status+body.
+ * Existing satellites that ignore the body get the same behaviour they had
+ * before — bell goes empty, AuthGate eventually catches it on next heartbeat.
  */
 export function createBroadcastProxyRouter(cfg: BroadcastProxyRouterConfig): ExpressRouter {
   if (typeof cfg.Router !== "function") {
@@ -80,21 +89,53 @@ export function createBroadcastProxyRouter(cfg: BroadcastProxyRouterConfig): Exp
     const limit = req.query.limit !== undefined ? parseInt(String(req.query.limit), 10) : undefined;
     const unreadOnly = String(req.query.unreadOnly ?? "") === "true";
     const since = typeof req.query.since === "string" ? req.query.since : undefined;
-    const inbox = await cfg.client.getInbox({ userId, cursor, limit: Number.isFinite(limit) ? limit : undefined, unreadOnly, since });
+    // Per-request session_expired tracker. Captured by the SDK via the per-call
+    // hook so we don't share state across concurrent requests.
+    let sessionExpired = false;
+    const inbox = await cfg.client.getInbox({
+      userId,
+      cursor,
+      limit: Number.isFinite(limit) ? limit : undefined,
+      unreadOnly,
+      since,
+      onSessionExpired: () => { sessionExpired = true; },
+    });
+    if (sessionExpired) {
+      res.status(401).json({ error: "session_expired" });
+      return;
+    }
     res.json(inbox);
   });
 
   router.post("/:id/read", async (req, res) => {
     const userId = await resolveUserId(req, res);
     if (userId === null) return;
-    const ok = await cfg.client.markRead({ userId, broadcastId: req.params.id });
+    let sessionExpired = false;
+    const ok = await cfg.client.markRead({
+      userId,
+      broadcastId: req.params.id,
+      onSessionExpired: () => { sessionExpired = true; },
+    });
+    if (sessionExpired) {
+      res.status(401).json({ error: "session_expired" });
+      return;
+    }
     res.status(ok ? 200 : 502).json({ ok });
   });
 
   router.post("/:id/modal-shown", async (req, res) => {
     const userId = await resolveUserId(req, res);
     if (userId === null) return;
-    const ok = await cfg.client.markModalShown({ userId, broadcastId: req.params.id });
+    let sessionExpired = false;
+    const ok = await cfg.client.markModalShown({
+      userId,
+      broadcastId: req.params.id,
+      onSessionExpired: () => { sessionExpired = true; },
+    });
+    if (sessionExpired) {
+      res.status(401).json({ error: "session_expired" });
+      return;
+    }
     res.status(ok ? 200 : 502).json({ ok });
   });
 
@@ -108,13 +149,17 @@ export function createBroadcastProxyRouter(cfg: BroadcastProxyRouterConfig): Exp
         res.status(400).json({ error: "missing_redirect_token" });
         return;
       }
-      const stored = await cfg.client.issueCallbackToken({ userId, bearer: redirectToken });
-      if (!stored) {
+      const result = await cfg.client.issueCallbackTokenDetailed({ userId, bearer: redirectToken });
+      if (!result.ok) {
+        if (result.sessionExpired) {
+          res.status(401).json({ error: "session_expired" });
+          return;
+        }
         res.status(502).json({ ok: false });
         return;
       }
       // Do NOT return the callback token to the browser. Just confirm storage.
-      res.json({ ok: true, expiresAt: stored.expiresAt });
+      res.json({ ok: true, expiresAt: result.stored.expiresAt });
     });
   }
 

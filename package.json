@@ -1,6 +1,6 @@
 {
   "name": "@central360/broadcast-client",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Official Central360 satellite SDK — drop-in TypeScript client for the Parinas Central360 HUB broadcast feature. Server-side proxy (HubBroadcastClient + Express router factory) + React layer (BroadcastProvider, hooks, drop-in components: BellIconWithBadge, InboxPanel, BroadcastBanner, BroadcastModalQueue). See the broadcast spec Part III §7 for the full integration guide.",
   "license": "MIT",
   "author": "Parinas Group Companies (PGC) — Central360 HUB team",

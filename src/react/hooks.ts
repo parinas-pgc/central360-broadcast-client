@@ -49,7 +49,7 @@ export function useBroadcastInbox(opts?: { unreadOnly?: boolean; pageSize?: numb
     initialPageParam: undefined,
     queryFn: async ({ pageParam }) => {
       return fetchInbox(
-        { basePath: ctx.basePath },
+        { basePath: ctx.basePath, onSessionExpired: ctx.onSessionExpired },
         { cursor: pageParam, limit: pageSize, unreadOnly },
       );
     },
@@ -155,7 +155,7 @@ export function useMarkRead() {
   const ctx = useBroadcastContext();
   const qc = useQueryClient();
   return useMutation<true, Error, string, CacheSnapshot[]>({
-    mutationFn: (broadcastId) => expectOk(apiMarkRead({ basePath: ctx.basePath }, broadcastId)),
+    mutationFn: (broadcastId) => expectOk(apiMarkRead({ basePath: ctx.basePath, onSessionExpired: ctx.onSessionExpired }, broadcastId)),
     onMutate: async (broadcastId) => {
       // Cancel in-flight queries so they don't overwrite the optimistic patch.
       await qc.cancelQueries({ queryKey: inboxQueryKeyPrefix(ctx.basePath) });
@@ -175,7 +175,7 @@ export function useMarkModalShown() {
   const ctx = useBroadcastContext();
   const qc = useQueryClient();
   return useMutation<true, Error, string, CacheSnapshot[]>({
-    mutationFn: (broadcastId) => expectOk(apiMarkModalShown({ basePath: ctx.basePath }, broadcastId)),
+    mutationFn: (broadcastId) => expectOk(apiMarkModalShown({ basePath: ctx.basePath, onSessionExpired: ctx.onSessionExpired }, broadcastId)),
     onMutate: async (broadcastId) => {
       await qc.cancelQueries({ queryKey: inboxQueryKeyPrefix(ctx.basePath) });
       return patchAllInboxCaches(qc, ctx.basePath, broadcastId, { modal_shown_at: new Date().toISOString() });

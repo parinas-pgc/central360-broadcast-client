@@ -24,7 +24,45 @@ export interface HubBroadcastClientConfig {
   timeoutMs?: number;
   /** Hook for SDK consumers to surface errors to their own logger (Sentry, etc). */
   onError?: (op: string, err: unknown) => void;
+  /**
+   * Hook fired when the SDK detects the hub returned `401 {"error":"session_expired"}`
+   * on any /v1/* call. Indicates the user's original 8h hub login window
+   * (`originalLoginExp`) has elapsed and the session cannot be renewed without
+   * re-authentication at the hub. Satellites typically respond by clearing local
+   * session state and redirecting the user to `${HUB_URL}/login?next=<satellite_url>`.
+   *
+   * The SDK still performs its standard cleanup (drop the cached callback token via
+   * `safeDelete`) regardless of whether this hook is wired. Wiring it just adds the
+   * proactive UX bounce. See `docs/broadcast-stance4-stabilization.md` for context.
+   *
+   * Added in 1.1.0. Optional — older satellites that don't pass this continue to
+   * work exactly as before (silent empty bell, eventual auth-gate fallback).
+   */
+  onSessionExpired?: (userId: number) => void | Promise<void>;
 }
+
+/**
+ * Discriminated result of an explicit callback-token issue/refresh attempt. Returned
+ * by `issueCallbackTokenDetailed` so callers (notably the proxy router's `/init`
+ * handler) can distinguish a hard session-expiration from other failure modes.
+ *
+ * Added in 1.1.0. The original `issueCallbackToken({...}) -> StoredToken | null`
+ * return shape is preserved for backward compatibility — it's now a thin wrapper
+ * over `issueCallbackTokenDetailed`.
+ */
+export type IssueCallbackTokenResult =
+  | { ok: true; stored: StoredToken }
+  | {
+      ok: false;
+      /** HTTP status from the hub, or 0 if the call never made it (network/timeout). */
+      status: number;
+      /**
+       * True when the hub returned `401 {"error":"session_expired"}`. Indicates the
+       * cap fired — see `HubBroadcastClientConfig.onSessionExpired` for the
+       * recommended satellite response.
+       */
+      sessionExpired: boolean;
+    };
 
 const DEFAULT_TIMEOUT_MS = 4000;
 const REFRESH_LEEWAY_MS = 60 * 1000; // refresh if token expires within next minute
@@ -55,6 +93,22 @@ async function timedFetch(
   }
 }
 
+/**
+ * Internal: best-effort parse of a JSON response body. Returns null if the body
+ * isn't readable as JSON (e.g. empty body, plain text, or already consumed). Used
+ * to detect structured error codes like `{"error":"session_expired"}` without
+ * letting a malformed body crash the SDK.
+ */
+async function safeReadErrorBody(res: Response): Promise<{ error?: string } | null> {
+  try {
+    const body = await res.json();
+    if (body && typeof body === "object") return body as { error?: string };
+    return null;
+  } catch {
+    return null;
+  }
+}
+
 export class HubBroadcastClient {
   private readonly hubUrl: string;
   private readonly hubApiKey: string;
@@ -63,6 +117,7 @@ export class HubBroadcastClient {
   private readonly fetchImpl: typeof fetch;
   private readonly timeoutMs: number;
   private readonly onError: (op: string, err: unknown) => void;
+  private readonly onSessionExpired?: (userId: number) => void | Promise<void>;
 
   constructor(cfg: HubBroadcastClientConfig) {
     if (!cfg.hubUrl) throw new Error("HubBroadcastClient: hubUrl is required");
@@ -76,6 +131,7 @@ export class HubBroadcastClient {
     this.fetchImpl = cfg.fetch ?? fetch;
     this.timeoutMs = cfg.timeoutMs ?? DEFAULT_TIMEOUT_MS;
     this.onError = cfg.onError ?? (() => {});
+    this.onSessionExpired = cfg.onSessionExpired;
   }
 
   private endpoint(path: string, query?: Record<string, string | number | boolean | undefined>): string {
@@ -97,6 +153,24 @@ export class HubBroadcastClient {
     };
     if (bearer) h["Authorization"] = `Bearer ${bearer}`;
     return h;
+  }
+
+  /**
+   * Internal: fire the configured `onSessionExpired` hook safely. Per-call hook
+   * (passed via opts) wins over the global hook so the proxy router can capture
+   * per-request signals without sharing state across requests.
+   */
+  private async fireSessionExpired(
+    userId: number,
+    perCall?: (userId: number) => void | Promise<void>,
+  ): Promise<void> {
+    const hook = perCall ?? this.onSessionExpired;
+    if (!hook) return;
+    try {
+      await hook(userId);
+    } catch (err) {
+      this.onError("onSessionExpired", err);
+    }
   }
 
   // ----- Token-store wrappers ----------------------------------------------
@@ -146,12 +220,19 @@ export class HubBroadcastClient {
 
   /**
    * Exchange a redirect token (or refresh an existing callback token) for a fresh
-   * long-lived hub-callback token. Stores the result in the configured TokenStore.
+   * hub-callback token. Stores the result in the configured TokenStore.
    *
    * - Call once at launch with `bearer = redirectToken` (the 30-sec token from /auth/verify).
    * - Call again before expiry with `bearer = currentCallbackToken` to refresh.
    *
-   * Returns the new stored token, or null on failure (caller decides whether to retry).
+   * Returns the new stored token, or `null` on any failure (caller decides whether
+   * to retry). For callers that need to distinguish `session_expired` from other
+   * failure modes (e.g. the proxy router's `/init` handler), use
+   * {@link issueCallbackTokenDetailed} instead.
+   *
+   * The token's `expiresAt` is the source of truth — it can be anywhere from a few
+   * seconds to 8 hours depending on the user's `originalLoginExp` (Stance 4 cap).
+   * Never assume "issued + 8h"; always read `stored.expiresAt`.
    */
   async issueCallbackToken({
     userId,
@@ -160,6 +241,38 @@ export class HubBroadcastClient {
     userId: number;
     bearer: string;
   }): Promise<StoredToken | null> {
+    const result = await this.issueCallbackTokenDetailed({ userId, bearer });
+    return result.ok ? result.stored : null;
+  }
+
+  /**
+   * Detailed variant of {@link issueCallbackToken}. Returns a discriminated result
+   * including `sessionExpired: true` when the hub returned
+   * `401 {"error":"session_expired"}`. Use this in places where the caller wants
+   * to surface the structured error code (e.g. forward `401 session_expired` to
+   * the browser so the satellite frontend can bounce to hub login).
+   *
+   * Added in 1.1.0. The behaviour and side-effects (TokenStore set/delete,
+   * `onSessionExpired` hook firing) are identical to `issueCallbackToken` —
+   * only the return shape differs. Optional per-call `onSessionExpired` hook
+   * lets the caller capture this signal without sharing state across requests.
+   */
+  async issueCallbackTokenDetailed({
+    userId,
+    bearer,
+    onSessionExpired,
+  }: {
+    userId: number;
+    bearer: string;
+    /**
+     * Per-call session-expired hook. Fires after the SDK detects
+     * `401 {"error":"session_expired"}` from the hub. Wins over the global
+     * `HubBroadcastClientConfig.onSessionExpired`. Use to capture the signal
+     * for a specific request (e.g. inside an Express handler) without sharing
+     * state across requests.
+     */
+    onSessionExpired?: (userId: number) => void | Promise<void>;
+  }): Promise<IssueCallbackTokenResult> {
     if (!Number.isInteger(userId) || userId <= 0) throw new Error("issueCallbackToken: invalid userId");
     if (!bearer) throw new Error("issueCallbackToken: bearer is required");
 
@@ -175,32 +288,36 @@ export class HubBroadcastClient {
     );
     if (!r.ok) {
       this.onError("issueCallbackToken:network", r.err);
-      return null;
+      return { ok: false, status: 0, sessionExpired: false };
     }
     if (r.res.status === 401 || r.res.status === 403) {
-      // Bearer rejected (expired or mismatched). Clear any stale entry so we don't
-      // attempt to refresh with a poisoned token next call.
+      // Bearer rejected (expired, mismatched, or session-cap exceeded). Read the
+      // body BEFORE clearing state so we can detect `session_expired` and fire
+      // the proactive-bounce hook for satellites that wired one.
+      const body = await safeReadErrorBody(r.res);
+      const sessionExpired = body?.error === "session_expired";
       await this.safeDelete(userId);
-      return null;
+      if (sessionExpired) await this.fireSessionExpired(userId, onSessionExpired);
+      return { ok: false, status: r.res.status, sessionExpired };
     }
     if (!r.res.ok) {
       this.onError("issueCallbackToken:status", new Error(`HTTP ${r.res.status}`));
-      return null;
+      return { ok: false, status: r.res.status, sessionExpired: false };
     }
     let body: IssueTokenResponse;
     try {
       body = (await r.res.json()) as IssueTokenResponse;
     } catch (err) {
       this.onError("issueCallbackToken:json", err);
-      return null;
+      return { ok: false, status: r.res.status, sessionExpired: false };
     }
     if (!body || typeof body.callbackToken !== "string" || typeof body.expiresAt !== "number") {
       this.onError("issueCallbackToken:shape", new Error("malformed response"));
-      return null;
+      return { ok: false, status: r.res.status, sessionExpired: false };
     }
     const stored: StoredToken = { token: body.callbackToken, expiresAt: body.expiresAt };
     await this.safeSet(userId, stored);
-    return stored;
+    return { ok: true, stored };
   }
 
   /**
@@ -208,24 +325,38 @@ export class HubBroadcastClient {
    * if the stored token is missing or expires within REFRESH_LEEWAY_MS. Returns null
    * if no token is available (caller should drop the request and surface empty state).
    */
-  private async ensureCallbackToken(userId: number): Promise<StoredToken | null> {
+  private async ensureCallbackToken(
+    userId: number,
+    onSessionExpired?: (userId: number) => void | Promise<void>,
+  ): Promise<StoredToken | null> {
     const stored = await this.safeGet(userId);
     if (!stored) return null;
     if (stored.expiresAt - Date.now() > REFRESH_LEEWAY_MS) return stored;
     // Stored token is close to expiry — try to refresh using itself as bearer.
-    const refreshed = await this.issueCallbackToken({ userId, bearer: stored.token });
-    return refreshed ?? null;
+    const result = await this.issueCallbackTokenDetailed({
+      userId,
+      bearer: stored.token,
+      onSessionExpired,
+    });
+    return result.ok ? result.stored : null;
   }
 
   /**
    * Inbox fetch with auto-refresh-on-401. Graceful-degradation: returns EMPTY_INBOX
    * on any error path so the satellite UI never breaks (spec §4).
+   *
+   * Pass `onSessionExpired` to receive the per-request signal when the hub reports
+   * `session_expired` during this call (either at refresh time or on the inbox
+   * call itself). The proxy router uses this to translate the bell-empty path
+   * into `401 {"error":"session_expired"}` for the browser.
    */
-  async getInbox(opts: { userId: number } & InboxQuery): Promise<InboxResponse> {
-    const { userId, cursor, limit, unreadOnly, since } = opts;
+  async getInbox(
+    opts: { userId: number; onSessionExpired?: (userId: number) => void | Promise<void> } & InboxQuery,
+  ): Promise<InboxResponse> {
+    const { userId, cursor, limit, unreadOnly, since, onSessionExpired } = opts;
     if (!Number.isInteger(userId) || userId <= 0) return EMPTY_INBOX;
 
-    const tok = await this.ensureCallbackToken(userId);
+    const tok = await this.ensureCallbackToken(userId, onSessionExpired);
     if (!tok) return EMPTY_INBOX;
 
     const url = this.endpoint("/v1/inbox", {
@@ -242,11 +373,14 @@ export class HubBroadcastClient {
       return EMPTY_INBOX;
     }
     if (r.res.status === 401) {
-      // Token expired between our leeway check and the call. Drop the stored token
-      // so the next call re-issues. We do NOT auto-retry here because we don't have
-      // a fresh bearer to issue with — the satellite must capture the redirect token
-      // at next user-driven login.
+      // Token expired between our leeway check and the call. Read the body to
+      // detect session_expired before clearing state. We do NOT auto-retry here
+      // because we don't have a fresh bearer — the satellite must capture the
+      // redirect token at next user-driven login.
+      const body = await safeReadErrorBody(r.res);
+      const sessionExpired = body?.error === "session_expired";
       await this.safeDelete(userId);
+      if (sessionExpired) await this.fireSessionExpired(userId, onSessionExpired);
       return EMPTY_INBOX;
     }
     if (r.res.status === 403 || r.res.status === 503) {
@@ -271,13 +405,21 @@ export class HubBroadcastClient {
    * Mark a broadcast as read for the user. Returns true on success, false on any
    * graceful-degradation path. Idempotent on the hub side (COALESCE — see route handler).
    */
-  async markRead(opts: { userId: number; broadcastId: string | number }): Promise<boolean> {
-    return this.simpleAck("/v1/", opts.broadcastId, "/read", opts.userId, "markRead");
+  async markRead(opts: {
+    userId: number;
+    broadcastId: string | number;
+    onSessionExpired?: (userId: number) => void | Promise<void>;
+  }): Promise<boolean> {
+    return this.simpleAck("/v1/", opts.broadcastId, "/read", opts.userId, "markRead", opts.onSessionExpired);
   }
 
   /** Mark first-login modal as shown for the user. Same semantics as markRead. */
-  async markModalShown(opts: { userId: number; broadcastId: string | number }): Promise<boolean> {
-    return this.simpleAck("/v1/", opts.broadcastId, "/modal-shown", opts.userId, "markModalShown");
+  async markModalShown(opts: {
+    userId: number;
+    broadcastId: string | number;
+    onSessionExpired?: (userId: number) => void | Promise<void>;
+  }): Promise<boolean> {
+    return this.simpleAck("/v1/", opts.broadcastId, "/modal-shown", opts.userId, "markModalShown", opts.onSessionExpired);
   }
 
   private async simpleAck(
@@ -286,12 +428,13 @@ export class HubBroadcastClient {
     suffix: string,
     userId: number,
     op: string,
+    onSessionExpired?: (userId: number) => void | Promise<void>,
   ): Promise<boolean> {
     if (!Number.isInteger(userId) || userId <= 0) return false;
     const idStr = String(broadcastId);
     if (!/^[0-9]+$/.test(idStr)) return false;
 
-    const tok = await this.ensureCallbackToken(userId);
+    const tok = await this.ensureCallbackToken(userId, onSessionExpired);
     if (!tok) return false;
 
     const url = this.endpoint(`${pre}${idStr}${suffix}`);
@@ -310,7 +453,10 @@ export class HubBroadcastClient {
       return false;
     }
     if (r.res.status === 401) {
+      const body = await safeReadErrorBody(r.res);
+      const sessionExpired = body?.error === "session_expired";
       await this.safeDelete(userId);
+      if (sessionExpired) await this.fireSessionExpired(userId, onSessionExpired);
       return false;
     }
     if (!r.res.ok) {

@@ -19,6 +19,13 @@ export interface BrowserClientConfig {
   fetch?: typeof fetch;
   /** Optional: forward extra headers (e.g. CSRF token). */
   headers?: Record<string, string>;
+  /**
+   * Fired when the proxy returns `401 {"error":"session_expired"}` (Stance 4 cap).
+   * Added in 1.1.0. Wired by `BroadcastProvider.onSessionExpired` — direct callers
+   * may pass it explicitly. The fetch helpers still return `EMPTY_INBOX` / `false`
+   * so existing graceful-degradation paths are unaffected.
+   */
+  onSessionExpired?: () => void;
 }
 
 async function timed(
@@ -49,12 +56,33 @@ function buildInboxUrl(basePath: string, q: InboxQuery): string {
   return typeof window !== "undefined" ? u.pathname + u.search : u.toString();
 }
 
+/**
+ * Best-effort detection of the proxy's `401 {"error":"session_expired"}` signal.
+ * Reads the body once; safe to ignore the result (caller still returns the empty
+ * shape regardless). Added in 1.1.0.
+ */
+async function detectSessionExpired(res: Response): Promise<boolean> {
+  if (res.status !== 401) return false;
+  try {
+    const body = await res.json();
+    return !!(body && typeof body === "object" && (body as { error?: string }).error === "session_expired");
+  } catch {
+    return false;
+  }
+}
+
 export async function fetchInbox(cfg: BrowserClientConfig, q: InboxQuery = {}): Promise<InboxResponse> {
   const fetchImpl = cfg.fetch ?? fetch;
   const timeoutMs = cfg.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   const url = buildInboxUrl(cfg.basePath, q);
   const res = await timed(fetchImpl, url, { method: "GET", headers: cfg.headers }, timeoutMs);
-  if (!res || !res.ok) return EMPTY_INBOX;
+  if (!res) return EMPTY_INBOX;
+  if (!res.ok) {
+    if (cfg.onSessionExpired && (await detectSessionExpired(res))) {
+      try { cfg.onSessionExpired(); } catch { /* swallow — UX hook should not break polling */ }
+    }
+    return EMPTY_INBOX;
+  }
   try {
     const body = (await res.json()) as InboxResponse;
     if (!body || !Array.isArray(body.broadcasts)) return EMPTY_INBOX;
@@ -74,7 +102,14 @@ async function postAck(cfg: BrowserClientConfig, broadcastId: string, suffix: st
     { method: "POST", headers: { "Content-Type": "application/json", ...cfg.headers }, body: "{}" },
     timeoutMs,
   );
-  return !!(res && res.ok);
+  if (!res) return false;
+  if (!res.ok) {
+    if (cfg.onSessionExpired && (await detectSessionExpired(res))) {
+      try { cfg.onSessionExpired(); } catch { /* swallow */ }
+    }
+    return false;
+  }
+  return true;
 }
 
 export function markRead(cfg: BrowserClientConfig, broadcastId: string): Promise<boolean> {

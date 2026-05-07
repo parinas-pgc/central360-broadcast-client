@@ -8,7 +8,12 @@
 export interface StoredToken {
   /** The raw hub-callback token string. Forwarded as `Authorization: Bearer <token>`. */
   token: string;
-  /** Epoch milliseconds at which the token expires. */
+  /**
+   * Epoch milliseconds at which the token expires. Variable — clamped by the
+   * hub to the user's `originalLoginExp` (Stance 4 cap). Can be anywhere from
+   * a few seconds to 8h from issuance. Always trust this value over a hardcoded
+   * "+8h" assumption. See `docs/broadcast-stance4-stabilization.md`.
+   */
   expiresAt: number;
 }
 

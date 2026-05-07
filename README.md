@@ -1,7 +1,5 @@
 # `@central360/broadcast-client`
 
-[![npm version](https://img.shields.io/npm/v/@central360/broadcast-client.svg)](https://www.npmjs.com/package/@central360/broadcast-client)
-
 Official SDK Parinas Central360 satellites use to integrate the Central360 HUB
 broadcast system end-to-end. Wraps the hub's `/v1/*` API with the callback-token
 refresh state machine, polling cadence, error semantics, and graceful-degradation
@@ -25,14 +23,32 @@ The SDK is distributed via the [Parinas GitHub repo](https://github.com/parinas-
 ```json
 {
   "dependencies": {
-    "@central360/broadcast-client": "github:parinas-pgc/central360-broadcast-client#v1.0.0"
+    "@central360/broadcast-client": "github:parinas-pgc/central360-broadcast-client#v1.1.0"
   }
 }
 ```
 
 Then `pnpm install` (or `npm install` / `yarn`). The package's `prepare` script auto-builds it during install, so you get the compiled `dist/` directly in `node_modules/`.
 
-> **Always pin to an exact tag** (`#v1.0.0`, not `#main`). Your lockfile then guarantees a deterministic install across CI, dev, and prod.
+> **Always pin to an exact tag** (`#v1.1.0`, not `#main`). Your lockfile then guarantees a deterministic install across CI, dev, and prod.
+
+### What's new in 1.1.0 (Stance 4 / `session_expired` surface)
+
+Non-breaking. Adds proactive UX for the hub's session-age cap:
+
+- The proxy router now translates the hub's `401 {"error":"session_expired"}`
+  into a same-shape browser-facing 401 (instead of silently returning empty).
+- `BroadcastProvider` accepts `onSessionExpired?: () => void` — wire it to bounce
+  the user to `${HUB_URL}/login` when the cap fires.
+- `HubBroadcastClient` accepts `onSessionExpired?: (userId) => void` for
+  server-side hooks (logging, custom session cleanup).
+- New `client.issueCallbackTokenDetailed({...})` returns a discriminated result
+  with `sessionExpired: boolean` for callers that need the structured signal.
+
+Existing 1.0.0 consumers that bump without changing any other code see no
+behaviour change beyond the bell going empty slightly earlier when the cap
+fires — same as today's fallback, just with the option to add a clean bounce.
+Full context: `docs/broadcast-stance4-stabilization.md`.
 
 For higher-assurance environments (production CI), pin to an immutable commit SHA instead of a tag — tags are mutable on GitHub, commit SHAs are not:
 >
@@ -40,7 +56,7 @@ For higher-assurance environments (production CI), pin to an immutable commit SH
 > "@central360/broadcast-client": "github:parinas-pgc/central360-broadcast-client#a1b2c3d4e5..."
 > ```
 
-If the GitHub repo is private (it is), make sure your dev machine and CI have a GitHub SSH key or PAT configured — the same one you already use to clone your satellite's own repo will work.
+The repo is public — no GitHub authentication needed. `pnpm install` works out of the box on dev machines, in CI, and inside Replit projects. The SDK itself contains no secrets; every credential (hub URL, hub API key, JWT verifier) is passed in by the caller at runtime.
 
 > **Heads-up:** install runs the SDK's `prepare` script which invokes `tsc` to build `dist/`. If your satellite uses `pnpm install --ignore-scripts` or `npm install --ignore-scripts`, the SDK won't build and imports will fail at runtime. Either drop `--ignore-scripts` for this install, or vendor a built copy of the SDK locally.
 
@@ -165,8 +181,13 @@ Token lifecycle (spec Part VII §17 F6 Option B):
 - If the token is within 60s of expiry the SDK calls
   `POST /v1/issue-callback-token` using the *current* callback token as bearer
   (the hub accepts either a redirect token or a valid callback token).
+- The token's `expiresAt` is **variable** (Stance 4 cap, hub-side as of
+  2026-05-07). It can be anywhere from a few seconds to 8h depending on the
+  user's `originalLoginExp`. Always read `stored.expiresAt`; never assume "+8h."
 - 401 on any /v1/ call → drop the cached token + return empty (the satellite's
-  next login flow will re-bootstrap).
+  next login flow will re-bootstrap). If the body is `{"error":"session_expired"}`,
+  the SDK additionally fires `onSessionExpired` (1.1.0+) so the satellite can
+  bounce the user to hub login.
 - 403/5xx/network/timeout → return empty inbox or `false` for write ops. The
   SDK never throws on hub-side errors. Only programmer errors throw.
 

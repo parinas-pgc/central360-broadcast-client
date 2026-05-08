@@ -23,14 +23,28 @@ The SDK is distributed via the [Parinas GitHub repo](https://github.com/parinas-
 ```json
 {
   "dependencies": {
-    "@central360/broadcast-client": "github:parinas-pgc/central360-broadcast-client#v1.1.0"
+    "@central360/broadcast-client": "github:parinas-pgc/central360-broadcast-client#v1.1.1"
   }
 }
 ```
 
 Then `pnpm install` (or `npm install` / `yarn`). The package's `prepare` script auto-builds it during install, so you get the compiled `dist/` directly in `node_modules/`.
 
-> **Always pin to an exact tag** (`#v1.1.0`, not `#main`). Your lockfile then guarantees a deterministic install across CI, dev, and prod.
+> **Always pin to an exact tag** (`#v1.1.1`, not `#main`). Your lockfile then guarantees a deterministic install across CI, dev, and prod.
+
+### What's new in 1.1.1 (install fix)
+
+Patch release. **No code or behaviour change vs 1.1.0** — fixes a packaging bug
+that broke installs in every consumer:
+
+- `devDependencies` no longer use pnpm `catalog:` references. Catalog refs are
+  workspace-internal; when pnpm clones the SDK into a temp dir to run the
+  `prepare` script, that temp dir has no catalog and the install fails with
+  `ERR_PNPM_CATALOG_ENTRY_NOT_FOUND_FOR_SPEC`. Replaced with literal version
+  ranges (`react: "^18.0.0 || ^19.0.0"`, etc.).
+
+If you tried `#v1.1.0` and saw the catalog-entry error, bump straight to
+`#v1.1.1` — same code, installs cleanly.
 
 ### What's new in 1.1.0 (Stance 4 / `session_expired` surface)
 
@@ -186,7 +200,7 @@ Token lifecycle (spec Part VII §17 F6 Option B):
   user's `originalLoginExp`. Always read `stored.expiresAt`; never assume "+8h."
 - 401 on any /v1/ call → drop the cached token + return empty (the satellite's
   next login flow will re-bootstrap). If the body is `{"error":"session_expired"}`,
-  the SDK additionally fires `onSessionExpired` (1.1.0+) so the satellite can
+  the SDK additionally fires `onSessionExpired` (1.1.1+) so the satellite can
   bounce the user to hub login.
 - 403/5xx/network/timeout → return empty inbox or `false` for write ops. The
   SDK never throws on hub-side errors. Only programmer errors throw.

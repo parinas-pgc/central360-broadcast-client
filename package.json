@@ -1,6 +1,6 @@
 {
   "name": "@central360/broadcast-client",
-  "version": "1.1.1",
+  "version": "1.1.2",
   "description": "Official Central360 satellite SDK — drop-in TypeScript client for the Parinas Central360 HUB broadcast feature. Server-side proxy (HubBroadcastClient + Express router factory) + React layer (BroadcastProvider, hooks, drop-in components: BellIconWithBadge, InboxPanel, BroadcastBanner, BroadcastModalQueue). See the broadcast spec Part III §7 for the full integration guide.",
   "license": "MIT",
   "author": "Parinas Group Companies (PGC) — Central360 HUB team",
@@ -47,8 +47,8 @@
     "clean": "tsc -b --clean",
     "build": "tsc -b --clean && tsc -b",
     "typecheck": "tsc -b --noEmit",
-    "prepare": "tsc -b --clean && tsc -b",
-    "prepack": "tsc -b --clean && tsc -b"
+    "prepare": "node -e \"console.log('[broadcast-client] skipping prepare; dist/ is shipped pre-built — see package.json scripts.build to rebuild from source')\"",
+    "prepack": "node -e \"console.log('[broadcast-client] skipping prepack; dist/ is shipped pre-built')\""
   },
   "peerDependencies": {
     "@tanstack/react-query": "^5.0.0",
